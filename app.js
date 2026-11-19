@@ -5,6 +5,9 @@
   const uid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const S = () => Store.get();
   const tr = (a, b) => `\u2066${a}–${b}\u2069`;
+  const arrAt = (b, slotId, sid) => (b.att && b.att[sid] && b.att[sid][slotId]) || null;
+  const ackAt = (aid, sid) => { const a = S().acks; return (a && a[sid] && a[sid][aid]) || null; };
+  const LIVE = () => Store.mode() === "live";
   const ROLE_NAME = { mgd: "מפקד היחידה", cmd: "מפקד סוללה", dep: "סגן מפקד סוללה", soldier: "לוחם/ת" };
   const SESSION_KEY = "gdud66-session";
 
@@ -26,6 +29,15 @@
     const u = who(); if (!u || u.kind !== "staff") return false;
     return u.role === "mgd" || ((u.role === "cmd" || u.role === "dep") && u.battery === bid);
   }
+  const ERR = { "auth/invalid-credential": "מספר אישי או קוד שגויים", "auth/wrong-password": "מספר אישי או קוד שגויים", "auth/user-not-found": "מספר אישי או קוד שגויים",
+    "auth/too-many-requests": "יותר מדי ניסיונות — נסה שוב בעוד כמה דקות", "auth/network-request-failed": "אין חיבור לרשת", "app/no-role": "המספר האישי לא משויך לאף מסגרת — פנה למפקד",
+    "auth/weak-password": "הקוד חייב להיות באורך 6 ספרות לפחות", "auth/email-already-in-use": "המספר האישי כבר רשום", "permission-denied": "אין הרשאה לפעולה הזו",
+    "auth/requires-recent-login": "יש להתנתק ולהתחבר מחדש לפני החלפת קוד" };
+  const errText = e => ERR[e && e.code] || "שגיאה: " + ((e && (e.code || e.message)) || e);
+  function fromProfile(p) {
+    me = p.role === "soldier" ? { kind: "soldier", id: p.sid, battery: p.battery } : { kind: "staff", id: p.sid, battery: p.battery };
+    ctx = p.battery || "a"; route = p.role === "mgd" ? "overview" : "home";
+  }
   function login(pn) {
     pn = String(pn).trim(); const s = S();
     const st = Object.values(s.staff).find(x => x.pn === pn);
@@ -41,7 +53,7 @@
     route = isStaff() ? (who().role === "mgd" ? "overview" : "home") : "home";
     return true;
   }
-  function logout() { me = null; try { localStorage.removeItem(SESSION_KEY); } catch {} render(); }
+  async function logout() { me = null; try { localStorage.removeItem(SESSION_KEY); } catch {} await Store.logout(); render(); }
 
   /* ---------- חישובי משמרות ---------- */
   const slotsOf = b => Object.values(b.slots || {}).sort((x, y) => Time.slotStart(x) - Time.slotStart(y));
@@ -56,10 +68,9 @@
   function batteryStats(b) {
     if (b.kind === "shift") {
       const sl = currentSlot(b); if (!sl) return { present: 0, total: 0, label: "אין משמרת" };
-      const arr = (b.arrivals && b.arrivals[sl.id]) || {};
       const mem = membersOf(b, sl.shift);
       const live = Time.slotStart(sl) <= Date.now();
-      return { present: mem.filter(m => arr[m.id]).length, total: mem.length, label: `${b.shifts[sl.shift].name} · ${live ? "פעילה" : "הבאה"} ${tr(sl.start, sl.end)}` };
+      return { present: mem.filter(m => arrAt(b, sl.id, m.id)).length, total: mem.length, label: `${b.shifts[sl.shift].name} · ${live ? "פעילה" : "הבאה"} ${tr(sl.start, sl.end)}` };
     }
     const assigned = Object.values(b.soldiers).filter(x => x.loc);
     return { present: assigned.filter(x => locPresent(b, x)).length, total: assigned.length, label: `${Object.keys(b.locations).length} מיקומים · ${Object.keys(b.teams || {}).length} צוותים מיוחדים` };
@@ -105,6 +116,7 @@
 
   /* ---------- מסך כניסה ---------- */
   function viewLogin() {
+    if (LIVE()) return viewLoginLive();
     const s = S();
     const demo = [["1000001", "מפקד היחידה"], ["1000011", "מ״ס א׳"], ["1000012", "סמ״ס א׳"], ["1000021", "מ״ס ב׳"], ["1000041", "מ״ס מ׳"],
       [Object.values(s.batteries.a.soldiers)[0].pn, "לוחם סוללה א׳"], [Object.values(s.batteries.b.soldiers)[0].pn, "לוחם סוללה ב׳"]];
@@ -124,6 +136,27 @@
       </div></div>`;
   }
 
+  function viewLoginLive() {
+    const setup = ui.setup;
+    return `<div class="login">
+      <div class="radar-bg"><div class="sweep"></div></div>
+      <div class="login-card">
+        ${EMBLEM}
+        <h1>גדוד 66 <span>בזמ״א</span></h1>
+        <p class="sub">${setup ? "הקמה ראשונית · מפקד היחידה" : "מערך הגנה אווירית · שליטה בכוח אדם"}</p>
+        <form id="loginForm" autocomplete="on">
+          ${setup ? `<label>שם ודרגה</label><input id="nm" placeholder='לדוגמה: סא"ל ישראל ישראלי' required>` : ""}
+          <label>מספר אישי</label>
+          <input id="pn" inputmode="numeric" pattern="[0-9]{5,9}" placeholder="מספר אישי" autocomplete="username" required>
+          <label>${setup ? "בחר קוד כניסה (6 ספרות לפחות)" : "קוד כניסה"}</label>
+          <input id="code" type="password" inputmode="numeric" minlength="6" placeholder="••••••" autocomplete="${setup ? "new-password" : "current-password"}" required>
+          <button class="btn primary big" type="submit">${setup ? "הקמת המערכת" : "כניסה למערכת"}</button>
+          <p class="err" id="loginErr"></p>
+        </form>
+        <div class="demo"><button class="chip" data-act="toggle-setup">${setup ? "← חזרה לכניסה" : "הקמה ראשונית (מפקד היחידה, פעם אחת בלבד)"}</button></div>
+      </div></div>`;
+  }
+
   /* ---------- מסגרת ---------- */
   function navItems() {
     const u = who();
@@ -134,17 +167,17 @@
     const b = S().batteries[ctx];
     return [...(u.role === "mgd" ? [["overview", "תמונת מצב", "◈"]] : []), ["home", "לוח בקרה", "◎"],
       ...(b.kind === "shift" ? [["schedule", "שבצ״ק", "▦"]] : [["teams", "צוותים מיוחדים", "✦"]]),
-      ["people", "כוח אדם", "☰"], ["summon", "זימון לאימון", "⚑"]];
+      ["people", "כוח אדם", "☰"], ["summon", "זימון לאימון", "⚑"], ...(u.role === "mgd" ? [["staff", "מפקדים והרשאות", "★"]] : [])];
   }
   function shell(content) {
     const u = who(); const s = S();
     const batSel = u.kind === "staff" && u.role === "mgd" && route !== "overview"
       ? `<select class="bat-sel" data-act="ctx">${Object.values(s.batteries).map(b => opt(b.id, b.name, b.id === ctx)).join("")}</select>` : "";
-    const badge = u.kind === "soldier" ? myAlerts().filter(a => !(a.acks || {})[u.id]).length : 0;
+    const badge = u.kind === "soldier" ? myAlerts().filter(a => !ackAt(a.id, u.id)).length : 0;
     return `<header class="top">
         <div class="brand">${EMBLEM}<div><b>גדוד 66 בזמ״א</b><small>${Store.mode() === "live" ? '<i class="live"></i>מחובר · זמן אמת' : "מצב הדגמה"}</small></div></div>
         <div class="me">${batSel}<div class="me-txt"><b>${esc(u.name)}</b><small>${ROLE_NAME[u.role]}${u.battery ? " · " + s.batteries[u.battery].name : ""}</small></div>
-        <button class="icon-btn" data-act="logout" title="יציאה">⏻</button></div>
+        ${LIVE() ? `<button class="icon-btn" data-act="change-code" title="החלפת קוד כניסה">🔑</button>` : ""}<button class="icon-btn" data-act="logout" title="יציאה">⏻</button></div>
       </header>
       <nav class="tabs">${navItems().map(([r, l, i]) => `<button class="tab ${route === r ? "on" : ""}" data-act="go" data-r="${r}"><span>${i}</span>${l}${r === "alerts" && badge ? `<em>${badge}</em>` : ""}</button>`).join("")}</nav>
       <main class="main">${content}</main>`;
@@ -158,7 +191,7 @@
       const sh = b.shifts[u.shift]; const sl = currentSlot(b, u.shift);
       if (!sl) mission = panel("המשמרת שלי", `<p class="muted">אין משמרות משובצות כרגע.</p>`);
       else {
-        const arrived = (b.arrivals?.[sl.id] || {})[u.id]; const open = arrivalOpen(sl); const live = Time.slotStart(sl) <= Date.now();
+        const arrived = arrAt(b, sl.id, u.id); const open = arrivalOpen(sl); const live = Time.slotStart(sl) <= Date.now();
         mission = `<section class="mission" style="--sc:${sh.color}">
           <div class="m-head"><span class="tag" style="--sc:${sh.color}">${sh.name}</span>${pill(arrived)}</div>
           <p class="m-lbl">${live ? "משמרת פעילה עכשיו" : "המשמרת הבאה שלך"}</p>
@@ -187,7 +220,7 @@
         mission += panel(`איתך ב${esc(loc.name)} (${mates.length})`, `<div class="roster">${mates.map(m => `<div class="sol ${locPresent(b, m) ? "on" : ""}"><i></i>${esc(m.name)}</div>`).join("")}</div>`);
       }
     }
-    const pending = myAlerts().filter(a => !(a.acks || {})[u.id]);
+    const pending = myAlerts().filter(a => !ackAt(a.id, u.id));
     return (pending.length ? `<button class="alert-strip" data-act="go" data-r="alerts">⚑ יש לך ${pending.length} זימונים שלא אושרו</button>` : "") + mission;
   }
   function viewSoldierAlerts() {
@@ -196,7 +229,7 @@
     return list.map(a => alertCard(a, u)).join("");
   }
   function alertCard(a, u) {
-    const acked = (a.acks || {})[u.id];
+    const acked = ackAt(a.id, u.id);
     return `<section class="summon ${acked ? "acked" : ""}">
       <div class="s-head"><span class="tag red">זימון לאימון</span><small>${esc(targetName(a))}</small></div>
       <h3>${esc(a.title || "אימון")}</h3>
@@ -237,7 +270,7 @@
       return `<div class="shift-card" style="--sc:${sh.color}"><b>${sh.name}</b><small>${membersOf(b, sh.id).length} אנשים</small><span>${n ? `${live ? "● פעילה" : "הבאה"} · ${Time.dayShort(n.date)} ${Time.dm(n.date)} ${n.start}` : "—"}</span></div>`;
     }).join("");
     if (!sl) return `<div class="shift-row">${shiftCards}</div>` + panel("נוכחות", `<p class="muted">אין משמרות בשבצ״ק. עבור/י ללשונית שבצ״ק כדי לבנות.</p>`);
-    const sh = b.shifts[sl.shift]; const arr = (b.arrivals && b.arrivals[sl.id]) || {}; const mem = membersOf(b, sl.shift);
+    const sh = b.shifts[sl.shift]; const arr = Object.fromEntries(Object.keys(b.soldiers).map(id => [id, arrAt(b, sl.id, id)]).filter(x => x[1])); const mem = membersOf(b, sl.shift);
     const present = mem.filter(m => arr[m.id]).length; const edit = canEdit(b.id);
     return `<div class="shift-row">${shiftCards}</div>
       <section class="hero" style="--sc:${sh.color}"><div>
@@ -343,7 +376,7 @@
       + panel("זימונים שנשלחו", list.length ? alertTable(list) : `<p class="muted">טרם נשלחו זימונים.</p>`);
   }
   function alertTable(list) {
-    return `<ul class="alert-list">${list.map(a => { const t = alertTargets(a); const acks = a.acks || {}; const n = t.filter(x => acks[x.id]).length; const open = ui.openAlert === a.id;
+    return `<ul class="alert-list">${list.map(a => { const t = alertTargets(a); const acks = Object.fromEntries(t.map(x => [x.id, ackAt(a.id, x.id)]).filter(x => x[1])); const n = t.filter(x => acks[x.id]).length; const open = ui.openAlert === a.id;
       return `<li><button class="al-row" data-act="toggle-alert" data-id="${a.id}"><div><b>${esc(a.title)}</b> · ${esc(targetName(a))}<small>${S().batteries[a.battery].name} · ${Time.dayShort(a.date)} ${Time.dm(a.date)} ${a.time}${a.place ? " · " + esc(a.place) : ""}</small></div>
         <span class="ack-num ${n === t.length ? "full" : ""}">${n}/${t.length} אישרו</span></button>
         ${open ? `<div class="al-detail"><p class="muted small">טרם אישרו:</p><div class="roster">${t.filter(x => !acks[x.id]).map(x => `<div class="sol"><i></i>${esc(x.name)}</div>`).join("") || "<p>כולם אישרו ✓</p>"}</div>
@@ -354,7 +387,12 @@
   function modal(html, onSubmit) {
     const m = $("#modal"); m.innerHTML = `<div class="modal-card"><form id="mForm" class="form">${html}<div class="row end"><button type="button" class="btn ghost" data-act="close-modal">ביטול</button><button class="btn primary" type="submit">שמירה</button></div></form></div>`;
     m.hidden = false;
-    $("#mForm").onsubmit = e => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target)); if (onSubmit(fd) !== false) closeModal(); };
+    $("#mForm").onsubmit = async e => {
+      e.preventDefault(); const btn = e.target.querySelector("[type=submit]"); btn.disabled = true;
+      const fd = Object.fromEntries(new FormData(e.target)); let r;
+      try { r = await onSubmit(fd); } catch (err) { console.error(err); toast(errText(err)); r = false; }
+      btn.disabled = false; if (r !== false) closeModal();
+    };
     const f = m.querySelector("input,select"); f && f.focus();
   }
   const closeModal = () => { $("#modal").hidden = true; $("#modal").innerHTML = ""; render(); };
@@ -387,17 +425,47 @@
   function soldierModal(b, sol) {
     modal(`<h3>${sol ? "עריכת לוחם" : "לוחם חדש"} · ${b.name}</h3>
       <label>שם מלא<input name="name" value="${esc(sol?.name || "")}" required></label>
-      <div class="row2"><label>מספר אישי<input name="pn" inputmode="numeric" value="${esc(sol?.pn || "")}" required></label><label>טלפון<input name="phone" value="${esc(sol?.phone || "")}"></label></div>
+      <div class="row2"><label>מספר אישי<input name="pn" inputmode="numeric" value="${esc(sol?.pn || "")}" ${sol && LIVE() ? "readonly" : ""} required></label><label>טלפון<input name="phone" value="${esc(sol?.phone || "")}"></label></div>
+      ${LIVE() && !sol ? `<label>קוד כניסה ראשוני (6 ספרות — מסור ללוחם, הוא יוכל להחליף)<input name="code" inputmode="numeric" minlength="6" pattern="[0-9]{6,}" value="${String(Math.floor(100000 + Math.random() * 900000))}" required></label>` : ""}
       ${b.kind === "shift" ? `<label>משמרת<select name="shift">${Object.values(b.shifts).map(sh => opt(sh.id, sh.name, sol ? sol.shift === sh.id : sh.id === "s1")).join("")}</select></label>` : ""}
       ${sol ? `<button type="button" class="btn danger" data-act="del-sol" data-s="${sol.id}">הסרת הלוחם מהסוללה</button>` : ""}`,
-      fd => {
+      async fd => {
         const dup = Object.values(S().batteries).some(x => Object.values(x.soldiers).some(y => y.pn === fd.pn && y.id !== sol?.id)) || Object.values(S().staff).some(x => x.pn === fd.pn);
         if (dup) { toast("מספר אישי כבר קיים במערכת"); return false; }
         const id = sol ? sol.id : b.id + uid("");
         const next = { ...(sol || { id, loc: null, locAt: 0 }), name: fd.name.trim(), pn: fd.pn.trim(), phone: fd.phone.trim() };
         if (b.kind === "shift") next.shift = fd.shift;
-        Store.write([[["batteries", b.id, "soldiers", id], next]]); toast("נשמר");
+        if (LIVE() && !sol) { await Store.createAccount(next.pn, fd.code, { role: "soldier", battery: b.id, sid: id }); }
+        Store.write([[["batteries", b.id, "soldiers", id], next]]);
+        if (LIVE() && !sol) { alert(`${next.name} נוסף/ה.\nפרטי כניסה למסירה:\nמספר אישי: ${next.pn}\nקוד: ${fd.code}`); } else toast("נשמר");
       });
+  }
+  function viewStaff() {
+    const s = S(); const list = Object.values(s.staff || {}).sort((a, c) => (a.battery || "").localeCompare(c.battery || ""));
+    return `<div class="people-bar"><p class="muted">מפקדי סוללות וסגניהם מקבלים הרשאת עריכה לסוללה שלהם בלבד. מפקד היחידה — לכל הגדוד.</p><button class="btn primary" data-act="add-staff">＋ הוספת מפקד</button></div>`
+      + panel(`${list.length} בעלי הרשאה`, `<ul class="people">${list.map(x => `<li><div class="nm"><b>${esc(x.name)}</b><small>מ.א. ${esc(x.pn)}</small></div>
+          <span class="tag">${ROLE_NAME[x.role]}${x.battery ? " · " + s.batteries[x.battery]?.name : ""}</span>
+          ${x.id !== me.id ? `<button class="icon-btn" data-act="del-staff" data-id="${x.id}" title="הסרה">✕</button>` : ""}</li>`).join("")}</ul>`);
+  }
+  function staffModal() {
+    const s = S();
+    modal(`<h3>הוספת מפקד</h3>
+      <label>שם ודרגה<input name="name" required></label>
+      <div class="row2"><label>מספר אישי<input name="pn" inputmode="numeric" required></label>
+      <label>תפקיד<select name="role"><option value="cmd">מפקד סוללה</option><option value="dep">סגן מפקד סוללה</option><option value="mgd">מפקד יחידה נוסף</option></select></label></div>
+      <label>סוללה<select name="battery">${Object.values(s.batteries).map(b => opt(b.id, b.name)).join("")}</select></label>
+      ${LIVE() ? `<label>קוד כניסה ראשוני (6 ספרות)<input name="code" inputmode="numeric" minlength="6" value="${String(Math.floor(100000 + Math.random() * 900000))}" required></label>` : ""}`,
+      async fd => {
+        const pn = fd.pn.trim(); const id = "u" + pn; const battery = fd.role === "mgd" ? null : fd.battery;
+        if (Object.values(s.staff).some(x => x.pn === pn)) { toast("כבר קיים"); return false; }
+        await Store.createAccount(pn, fd.code, { role: fd.role, battery, sid: id });
+        Store.write([[["staff", id], { id, name: fd.name.trim(), pn, role: fd.role, battery }]]);
+        if (LIVE()) alert(`${fd.name.trim()} נוסף/ה.\nפרטי כניסה למסירה:\nמספר אישי: ${pn}\nקוד: ${fd.code}`);
+      });
+  }
+  function codeModal() {
+    modal(`<h3>החלפת קוד כניסה</h3><label>קוד חדש (6 ספרות לפחות)<input name="c1" type="password" inputmode="numeric" minlength="6" required></label><label>שוב, לאימות<input name="c2" type="password" inputmode="numeric" minlength="6" required></label>`,
+      async fd => { if (fd.c1 !== fd.c2) { toast("הקודים לא תואמים"); return false; } await Store.changeCode(fd.c1); toast("הקוד הוחלף ✓"); });
   }
   function textModal(title, label, value, cb) { modal(`<h3>${title}</h3><label>${label}<input name="v" value="${esc(value)}" required></label>`, fd => cb(fd.v.trim())); }
 
@@ -405,7 +473,7 @@
   const notified = new Set(JSON.parse(sessionStorage.getItem("g66-notified") || "[]"));
   function checkPopups() {
     const u = who(); if (!u || u.kind !== "soldier") return;
-    const pending = myAlerts().filter(a => !(a.acks || {})[u.id]);
+    const pending = myAlerts().filter(a => !ackAt(a.id, u.id));
     const fresh = pending.filter(a => !notified.has(a.id));
     if (!fresh.length) return;
     fresh.forEach(a => {
@@ -432,7 +500,7 @@
     if (u.kind === "soldier") html = route === "schedule" ? viewSchedule() : route === "alerts" ? viewSoldierAlerts() : viewSoldierHome();
     else {
       const valid = navItems().map(n => n[0]); if (!valid.includes(route)) route = valid[0];
-      html = { overview: viewOverview, home: viewCmdHome, schedule: viewSchedule, people: viewPeople, teams: viewTeams, summon: viewSummon }[route]();
+      html = { overview: viewOverview, home: viewCmdHome, schedule: viewSchedule, people: viewPeople, teams: viewTeams, summon: viewSummon, staff: viewStaff }[route]();
     }
     const focus = document.activeElement && document.activeElement.dataset.act === "search" ? document.activeElement.selectionStart : null;
     app.innerHTML = shell(html);
@@ -441,12 +509,24 @@
     checkPopups();
   }
   function bindLogin() {
-    $("#loginForm").onsubmit = e => { e.preventDefault(); if (login($("#pn").value)) { askNotify(); render(); } else $("#loginErr").textContent = "מספר אישי לא נמצא במערכת"; };
+    $("#loginForm").onsubmit = async e => {
+      e.preventDefault();
+      if (!LIVE()) { if (login($("#pn").value)) { askNotify(); render(); } else $("#loginErr").textContent = "מספר אישי לא נמצא במערכת"; return; }
+      const btn = e.target.querySelector("[type=submit]"); btn.disabled = true; $("#loginErr").textContent = "";
+      const pn = $("#pn").value.trim(), code = $("#code").value;
+      try {
+        const p = ui.setup ? await Store.bootstrap(pn, code, $("#nm").value.trim()) : await Store.login(pn, code);
+        ui.setup = false; fromProfile(p); askNotify(); render();
+      } catch (err) {
+        console.error(err); btn.disabled = false;
+        $("#loginErr").textContent = ui.setup && err.code === "permission-denied" ? "המערכת כבר הוקמה — היכנס עם מספר אישי וקוד" : errText(err);
+      }
+    };
   }
   function askNotify() { try { if ("Notification" in window && Notification.permission === "default") Notification.requestPermission(); } catch {} }
   function sendSummon(e) {
     e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target)); const [type, id] = fd.target.split(":");
-    const a = { id: uid("al"), battery: ctx, target: { type, id: id || null }, title: fd.title.trim() || "אימון", date: fd.date, time: fd.time, when: fd.date + "T" + fd.time, place: fd.place.trim(), note: fd.note.trim(), createdBy: who().name, createdAt: Date.now(), acks: {} };
+    const a = { id: uid("al"), battery: ctx, target: { type, id: id || null }, title: fd.title.trim() || "אימון", date: fd.date, time: fd.time, when: fd.date + "T" + fd.time, place: fd.place.trim(), note: fd.note.trim(), createdBy: who().name, createdAt: Date.now() };
     Store.write([[["alerts", a.id], a]]);
     toast(`הזימון נשלח ל-${alertTargets(a).length} לוחמים`);
   }
@@ -460,15 +540,15 @@
       case "logout": logout(); break;
       case "go": route = d.r; ui.swapA = null; render(); scrollTo(0, 0); break;
       case "open-bat": ctx = d.b; route = "home"; render(); scrollTo(0, 0); break;
-      case "arrive-shift": { const sb = s.batteries[u.battery]; Store.write([[["batteries", sb.id, "arrivals", d.slot, u.id], Date.now()]]); toast("הגעתך דווחה ✓"); break; }
+      case "arrive-shift": { const sb = s.batteries[u.battery]; Store.write([[["batteries", sb.id, "att", u.id, d.slot], Date.now()]]); toast("הגעתך דווחה ✓"); break; }
       case "arrive-loc": Store.write([[["batteries", u.battery, "locArrivals", u.id], { loc: u.loc, at: Date.now() }]]); toast("הגעתך ליעד דווחה ✓"); break;
-      case "toggle-arr": { const cur = (b.arrivals?.[d.slot] || {})[d.s]; Store.write([[["batteries", b.id, "arrivals", d.slot, d.s], cur ? undefined : Date.now()]]); break; }
-      case "ack": Store.write([[["alerts", d.id, "acks", u.id], Date.now()]]); $("#popup").hidden = true; toast("אישור התקבל"); break;
+      case "toggle-arr": { const cur = arrAt(b, d.slot, d.s); Store.write([[["batteries", b.id, "att", d.s, d.slot], cur ? undefined : Date.now()]]); break; }
+      case "ack": Store.write([[["acks", u.id, d.id], Date.now()]]); $("#popup").hidden = true; toast("אישור התקבל"); break;
       case "close-popup": $("#popup").hidden = true; break;
       case "week": ui.week = +d.d === 0 ? 0 : ui.week + +d.d; render(); break;
       case "edit-slot": slotModal(b, b.slots[d.id]); break;
       case "new-slot": slotModal(b, null, d.date); break;
-      case "del-slot": if (confirm("למחוק את המשמרת מהשבצ״ק?")) { Store.write([[["batteries", b.id, "slots", d.id], undefined], [["batteries", b.id, "arrivals", d.id], undefined]]); closeModal(); } break;
+      case "del-slot": if (confirm("למחוק את המשמרת מהשבצ״ק?")) { Store.write([[["batteries", b.id, "slots", d.id], undefined]]); closeModal(); } break;
       case "auto-sched": autoModal(b); break;
       case "close-modal": closeModal(); break;
       case "add-loc": textModal("מיקום חדש", "שם המיקום", "", v => { const id = uid("l"); Store.write([[["batteries", b.id, "locations", id], { id, name: v }]]); }); break;
@@ -487,14 +567,18 @@
       case "swap-cancel": ui.swapA = null; render(); break;
       case "add-sol": soldierModal(b, null); break;
       case "edit-sol": soldierModal(b, b.soldiers[d.s]); break;
-      case "del-sol": if (confirm("להסיר את הלוחם מהסוללה?")) { const ops = [[["batteries", b.id, "soldiers", d.s], undefined]];
-          Object.values(b.teams || {}).forEach(tm => tm.roles.forEach((r, i) => { if (r.sid === d.s) ops.push([["batteries", b.id, "teams", tm.id, "roles", i, "sid"], null]); }));
-          Store.write(ops); closeModal(); } break;
+      case "del-sol": if (confirm("להסיר את הלוחם מהסוללה? הגישה שלו לאפליקציה תיחסם.")) { const pn = b.soldiers[d.s].pn; const ops = [[["batteries", b.id, "soldiers", d.s], undefined]];
+          Object.values(b.teams || {}).forEach(tm => { if (tm.roles.some(r => r.sid === d.s)) ops.push([["batteries", b.id, "teams", tm.id, "roles"], tm.roles.map(r => (r.sid === d.s ? { ...r, sid: null } : r))]); });
+          Store.write(ops); Store.deleteRole(pn).catch(err => toast(errText(err))); closeModal(); } break;
+      case "toggle-setup": ui.setup = !ui.setup; render(); break;
       case "add-team": { const id = uid("t"); Store.write([[["batteries", b.id, "teams", id], { id, name: `צוות מיוחד ${Object.keys(b.teams || {}).length + 1}`, roles: Seed.TEAM_ROLES.map(title => ({ title, sid: null })) }]]); break; }
       case "rename-team": textModal("שם הצוות", "שם", b.teams[d.t].name, v => Store.write([[["batteries", b.id, "teams", d.t, "name"], v]])); break;
       case "del-team": if (confirm("למחוק את הצוות?")) Store.write([[["batteries", b.id, "teams", d.t], undefined]]); break;
       case "toggle-alert": ui.openAlert = ui.openAlert === d.id ? null : d.id; render(); break;
       case "del-alert": if (confirm("לבטל את הזימון?")) Store.write([[["alerts", d.id], undefined]]); break;
+      case "add-staff": staffModal(); break;
+      case "del-staff": { const st = s.staff[d.id]; if (st && confirm(`להסיר את ${st.name} מההרשאות?`)) { Store.write([[["staff", d.id], undefined]]); Store.deleteRole(st.pn).catch(err => toast("שגיאה: " + err.code)); } break; }
+      case "change-code": codeModal(); break;
     }
   });
   document.addEventListener("change", e => {
@@ -512,9 +596,11 @@
 
   /* ---------- אתחול ---------- */
   (async () => {
-    await Store.init();
-    try { const saved = JSON.parse(localStorage.getItem(SESSION_KEY)); if (saved) { me = saved; const u = who(); if (u) { ctx = u.battery || "a"; route = u.role === "mgd" ? "overview" : "home"; } else me = null; } } catch {}
+    try { await Store.init(); } catch (e) { console.error(e); $("#app").innerHTML = `<div class="login"><div class="login-card"><h1>שגיאת חיבור</h1><p class="sub">${esc(errText(e))}</p><button class="btn primary" onclick="location.reload()">נסה שוב</button></div></div>`; return; }
+    if (LIVE()) { const p = Store.profile(); if (p) fromProfile(p); }
+    else try { const saved = JSON.parse(localStorage.getItem(SESSION_KEY)); if (saved) { me = saved; const u = who(); if (u) { ctx = u.battery || "a"; route = u.role === "mgd" ? "overview" : "home"; } else me = null; } } catch {}
     Store.sub(() => { if (!$("#modal").hidden) return; render(); });
+    addEventListener("g66-sync-error", e => toast(errText(e.detail)));
     render();
     setInterval(() => { if ($("#modal").hidden && document.activeElement?.tagName !== "SELECT" && document.activeElement?.tagName !== "INPUT") render(); }, 60e3);
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) navigator.serviceWorker.register("sw.js").catch(() => {});

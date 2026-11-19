@@ -1,0 +1,60 @@
+rules_version = '2';
+// גדוד 66 בזמ"א — כללי הרשאות
+// roles/{pn}: { role: 'mgd'|'cmd'|'dep'|'soldier', battery, sid }
+// gdud66/battery_{a|b|g|m}, gdud66/staff, gdud66/alerts, gdud66/acks, gdud66/meta
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.email != null; }
+    function pn() { return request.auth.token.email.split('@')[0]; }
+    function rolePath() { return /databases/$(database)/documents/roles/$(pn()); }
+    function me() { return get(rolePath()).data; }
+    function hasRole() { return signedIn() && exists(rolePath()); }
+    function isMgd() { return hasRole() && me().role == 'mgd'; }
+    function isStaff() { return hasRole() && me().role in ['mgd', 'cmd', 'dep']; }
+    function isCmdOf(b) { return hasRole() && (me().role == 'mgd' || (me().role in ['cmd', 'dep'] && me().battery == b)); }
+    function metaPath() { return /databases/$(database)/documents/gdud66/meta; }
+    function onlyKey(field, key) {
+      return request.resource.data.get(field, {}).diff(resource.data.get(field, {})).affectedKeys().hasOnly([key]);
+    }
+
+    match /roles/{p} {
+      allow read: if signedIn() && (p == pn() || isStaff());
+      // הקמה ראשונית: המשתמש הראשון הופך למפקד היחידה, רק כל עוד meta לא קיים
+      allow create: if (signedIn() && p == pn() && request.resource.data.role == 'mgd'
+                        && !exists(metaPath()) && existsAfter(metaPath()))
+                    || isMgd()
+                    || (request.resource.data.role == 'soldier' && isCmdOf(request.resource.data.battery));
+      allow update: if isMgd()
+                    || (resource.data.role == 'soldier' && request.resource.data.role == 'soldier'
+                        && isCmdOf(resource.data.battery) && isCmdOf(request.resource.data.battery));
+      allow delete: if isMgd() || (resource.data.role == 'soldier' && isCmdOf(resource.data.battery));
+    }
+
+    match /gdud66/{docId} {
+      function batt() { return docId.split('_')[1]; }
+      function isBattery() { return docId.matches('battery_[a-z]+'); }
+
+      allow read: if hasRole() && (
+        docId in ['staff', 'alerts', 'acks', 'meta'] ||
+        (isBattery() && (isMgd() || me().battery == batt()))
+      );
+
+      allow create: if (docId == 'meta' && signedIn() && !exists(metaPath())
+                        && getAfter(rolePath()).data.role == 'mgd')
+                    || (docId != 'meta' && isMgd());
+
+      allow update: if
+        (isBattery() && isCmdOf(batt())) ||
+        (docId == 'staff' && isMgd()) ||
+        (docId == 'alerts' && isStaff()) ||
+        (docId == 'acks' && (isStaff() || (hasRole() &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([me().sid])))) ||
+        // לוחם מדווח הגעה — רק את השדה של עצמו
+        (isBattery() && hasRole() && me().role == 'soldier' && me().battery == batt()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['att', 'locArrivals'])
+          && onlyKey('att', me().sid) && onlyKey('locArrivals', me().sid));
+
+      allow delete: if isMgd() && docId != 'meta';
+    }
+  }
+}
